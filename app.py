@@ -4,18 +4,17 @@ import uuid
 from datetime import datetime, timedelta
 from functools import wraps
 
-from flask import Flask, request, jsonify, session, send_from_directory
+from flask import Flask, request, jsonify, session
 from sqlalchemy.exc import SQLAlchemyError
 from flask_cors import CORS
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.middleware.proxy_fix import ProxyFix
 import markdown
 import bleach
 
 # GitHub integration
 try:
-    from github import Github, Auth, InputGitAuthor
+    from github import Github, Auth
     from github.GithubException import GithubException
     GITHUB_AVAILABLE = True
     print("✅ GitHub module loaded")
@@ -23,85 +22,30 @@ except ImportError:
     GITHUB_AVAILABLE = False
     print("⚠️ GitHub module not available - install with: pip install PyGithub")
 
-
+# Load environment variables
 load_dotenv()
 
-
-
-
-def env_flag(name, default=False):
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def split_csv_env(name, default=None):
-    raw = os.getenv(name, "")
-    values = [item.strip() for item in raw.split(",") if item.strip()]
-    return values or (default[:] if default else [])
-
-
-def normalize_database_url(url):
-    if url.startswith('postgres://'):
-        return url.replace('postgres://', 'postgresql://', 1)
-    return url
-
-
-DEFAULT_LOCAL_ORIGINS = [
-    "http://127.0.0.1:8000",
-    "http://localhost:8000",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
-
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
-render_external_url = os.getenv('RENDER_EXTERNAL_URL', '').strip()
-custom_domain = os.getenv('CUSTOM_DOMAIN', '').strip()
-frontend_origin = os.getenv('FRONTEND_ORIGIN', '').strip()
-additional_origins = split_csv_env('ALLOWED_ORIGINS', default=DEFAULT_LOCAL_ORIGINS)
+# CORS configuration
+CORS(app, 
+     supports_credentials=True,
+     origins=["http://127.0.0.1:8000", "http://localhost:8000", "http://localhost:3000"],
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
-allowed_origins = set(additional_origins)
-for value in (render_external_url, frontend_origin):
-    if value:
-        allowed_origins.add(value.rstrip('/'))
-if custom_domain:
-    custom_domain = custom_domain.replace('https://', '').replace('http://', '').strip('/')
-    if custom_domain:
-        allowed_origins.add(f'https://{custom_domain}')
-        allowed_origins.add(f'http://{custom_domain}')
-        allowed_origins.add(f'https://www.{custom_domain}')
-        allowed_origins.add(f'http://www.{custom_domain}')
-
-allowed_origins = sorted(allowed_origins)
-
-database_url = normalize_database_url(
-    os.getenv('DATABASE_URL', 'postgresql://postgres:password@localhost/easyprivacy')
-)
-
+# Configuration
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'postgresql://postgres:password@localhost/easyprivacy')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['PREFERRED_URL_SCHEME'] = 'https' if env_flag('FORCE_HTTPS', default=bool(render_external_url or custom_domain)) else 'http'
-app.config['SESSION_COOKIE_SECURE'] = env_flag('SESSION_COOKIE_SECURE', default=bool(render_external_url or custom_domain))
+app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', 'false').lower() == 'true'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
-app.config['SESSION_COOKIE_NAME'] = os.getenv('SESSION_COOKIE_NAME', 'easyprivacy_session')
-app.config['SESSION_COOKIE_DOMAIN'] = os.getenv('SESSION_COOKIE_DOMAIN') or None
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['SESSION_REFRESH_EACH_REQUEST'] = True
 
-# CORS configuration
-CORS(
-    app,
-    supports_credentials=True,
-    origins=allowed_origins,
-    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
-)
+
 
 
 
@@ -155,42 +99,9 @@ def safe_uuid(value):
     except (ValueError, TypeError, AttributeError):
         return None
 
-
-
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_INDEX = os.getenv('FRONTEND_INDEX', 'index.html')
-FRONTEND_STYLE = os.getenv('FRONTEND_STYLE', 'style.css')
-
-
-@app.route('/')
-def serve_frontend():
-    frontend_path = os.path.join(BASE_DIR, FRONTEND_INDEX)
-    if os.path.exists(frontend_path):
-        return send_from_directory(BASE_DIR, FRONTEND_INDEX)
-    return jsonify({
-        'message': 'EasyPrivacy API is running',
-        'status': 'ok'
-    })
-
-
-@app.route('/style.css')
-def serve_style():
-    style_path = os.path.join(BASE_DIR, FRONTEND_STYLE)
-    if os.path.exists(style_path):
-        return send_from_directory(BASE_DIR, FRONTEND_STYLE, mimetype='text/css')
-    return ('', 404)
-
-
-@app.route('/health')
-def health_check():
-    return jsonify({'status': 'ok', 'service': 'easyprivacy'})
-
-
 # Initialize database
 from models import db, User, ForumCategory, ForumPost, Comment, Tag, PostTags, Vote, WikiEdit, WikiEditVote, ModerationAction, RateLimit
 db.init_app(app)
-
 
 
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
@@ -281,17 +192,6 @@ class GitHubWikiManager:
             return False
         try:
             file_path = f"{self.wiki_path}/{slug}.md" if self.wiki_path else f"{slug}.md"
-
-            safe_name = (author_name or 'Anonymous').strip() or 'Anonymous'
-            safe_email_local = ''.join(ch.lower() if ch.isalnum() else '.' for ch in safe_name)
-            while '..' in safe_email_local:
-                safe_email_local = safe_email_local.replace('..', '.')
-            safe_email_local = safe_email_local.strip('.') or 'anonymous'
-            git_author = InputGitAuthor(
-                name=safe_name,
-                email=f"{safe_email_local}@users.noreply.github.com"
-            )
-
             try:
                 contents = self.repo.get_contents(file_path, ref=branch_name)
                 self.repo.update_file(
@@ -299,18 +199,14 @@ class GitHubWikiManager:
                     message=edit_comment,
                     content=content,
                     sha=contents.sha,
-                    branch=branch_name,
-                    author=git_author
+                    branch=branch_name
                 )
-            except GithubException as e:
-                if getattr(e, 'status', None) != 404:
-                    raise
+            except GithubException:
                 self.repo.create_file(
                     path=file_path,
                     message=edit_comment,
                     content=content,
-                    branch=branch_name,
-                    author=git_author
+                    branch=branch_name
                 )
             return True
         except GithubException as e:
@@ -1095,7 +991,7 @@ def moderation_action():
     
     return jsonify({'message': f"Content {data['action']}ed"})
 
-# Health Check
+# HEALTH CHECK 
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
@@ -1114,13 +1010,14 @@ def health_check():
         'timestamp': datetime.utcnow().isoformat()
     })
 
-
+# AFTER REQUEST
 
 @app.after_request
 def after_request(response):
     origin = request.headers.get('Origin')
-    if origin and origin.rstrip('/') in set(allowed_origins):
-        response.headers['Access-Control-Allow-Origin'] = origin.rstrip('/')
+    allowed_origins = {"http://127.0.0.1:8000", "http://localhost:8000", "http://localhost:3000"}
+    if origin in allowed_origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-Requested-With'
     response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
     response.headers['Access-Control-Allow-Credentials'] = 'true'
@@ -1128,12 +1025,10 @@ def after_request(response):
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
     response.headers['X-Frame-Options'] = 'SAMEORIGIN'
-    if app.config.get('SESSION_COOKIE_SECURE'):
-        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains; preload'
     return response
 
+# INITIALIZE DATABASE
 
-#Database init
 with app.app_context():
     try:
         db.create_all()
@@ -1175,7 +1070,7 @@ with app.app_context():
     except Exception as e:
         print(f" Database initialization warning: {e}")
 
-#Server init
+# START SERVER
 
 if __name__ == '__main__':
     print("\n" + "="*60)
@@ -1183,7 +1078,7 @@ if __name__ == '__main__':
     print("="*60)
     
     if github_manager and github_manager.authenticated:
-        print(f"\n📚 GitHub Repository: {GITHUB_OWNER}/{GITHUB_REPO}")
+        print(f"\n GitHub Repository: {GITHUB_OWNER}/{GITHUB_REPO}")
     
     with app.app_context():
         user_count = User.query.count()
