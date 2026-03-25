@@ -1,0 +1,10 @@
+Flask
+Flask-SQLAlchemy
+Flask-CORS
+python-dotenv
+Werkzeug
+markdown
+bleach
+PyGithub
+gunicorn
+psycopg2-binary
